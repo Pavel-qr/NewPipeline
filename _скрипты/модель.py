@@ -191,19 +191,56 @@ def _заголовки(токен):
     }
 
 
+# Полный разбор одного отказа. В сообщении об ошибке тело ответа обрезано до
+# 800 знаков, а запроса нет вовсе — для разговора с провайдером этого мало.
+# Пишется только первый отказ: дальше пойдут такие же, а файл нужен один.
+ДАМП = os.path.join(КОРЕНЬ, "отказ_api.json")
+СЕКРЕТНЫЕ = ("x-api-key", "authorization")
+
+
+def _без_ключа(заголовки):
+    """Ключ в файл не попадает: он же уходит в git (см. README)."""
+    return {к: ("<скрыт>" if к.lower() in СЕКРЕТНЫЕ else з)
+            for к, з in заголовки.items()}
+
+
+def _записать_отказ(method, url, заголовки, тело, ответ):
+    if os.path.exists(ДАМП):
+        return
+    разбор = {
+        "когда": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "запрос": {"метод": method, "url": url,
+                   "заголовки": _без_ключа(заголовки), "тело": тело},
+        "ответ": ответ,
+    }
+    try:
+        with open(ДАМП, "w", encoding="utf-8") as f:
+            json.dump(разбор, f, ensure_ascii=False, indent=2)
+        print(f"    полный разбор отказа записан: {ДАМП}", flush=True)
+    except OSError as e:
+        print(f"    не удалось записать разбор отказа: {e}", flush=True)
+
+
 def _http_json(method, url, токен, тело=None, timeout=60):
     данные = None if тело is None else json.dumps(тело, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=данные, headers=_заголовки(токен), method=method)
+    заголовки = _заголовки(токен)
+    req = urllib.request.Request(url, data=данные, headers=заголовки, method=method)
     ctx = _ssl_контекст()
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as отв:
             return json.loads(отв.read().decode("utf-8"))
     except urllib.error.HTTPError as сбой:
-        кусок = сбой.read().decode("utf-8", errors="replace")[:800]
+        целиком = сбой.read().decode("utf-8", errors="replace")
+        _записать_отказ(method, url, заголовки, тело,
+                        {"код": сбой.code, "причина": сбой.reason,
+                         "заголовки": dict(сбой.headers or {}), "тело": целиком})
         if сбой.code in (401, 403):
             raise RuntimeError("API отклонил ключ (401/403). Проверьте API_KEY.") from сбой
-        raise RuntimeError(f"HTTP {сбой.code}: {кусок}") from сбой
+        raise RuntimeError(f"HTTP {сбой.code}: {целиком[:800]}") from сбой
     except (urllib.error.URLError, TimeoutError, OSError) as сбой:
+        _записать_отказ(method, url, заголовки, тело,
+                        {"код": None, "причина": f"{type(сбой).__name__}: {сбой}",
+                         "заголовки": {}, "тело": None})
         raise RuntimeError(f"сеть: {сбой}") from сбой
 
 
